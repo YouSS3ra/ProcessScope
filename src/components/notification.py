@@ -1,245 +1,701 @@
-import time
-import psutil
-from winotify import Notification, audio
-import winsound
+
 import threading
 import tkinter.messagebox as messagebox
+from tkinter import PhotoImage
+
 import customtkinter as ctk
-from tkinter import PhotoImage  # Utiliser PhotoImage de tkinter
 
-import platform
-import subprocess
+from paths import IMAGES_DIR
 
-# Seuils de surveillance
-INACTIVE_THRESHOLD = 300  # Temps d'inactivité d'un processus en secondes (5 minutes)
-CPU_USAGE_THRESHOLD = 5  # Pourcentage d'utilisation CPU
-MEMORY_USAGE_THRESHOLD = 50  # Mémoire utilisée en Mo
+from monitor_service import (
+    MonitoringConfig,
+    monitor_processes,
+    validate_interval,
+    validate_settings,
+    resolve_sound
+)
 
-# Variables globales
+
+# ============================================================
+# 1. CONFIGURATION ET ÉTAT DE L'INTERFACE
+# ============================================================
+
+# Configuration partagée avec le moteur de surveillance.
+config = MonitoringConfig()
+
+# État du thread de surveillance.
 is_monitoring = False
-MONITORING_INTERVAL = 5  # Intervalle par défaut en secondes
-ALERT_SOUND = audio.Default  # Son d'alerte par défaut
+monitoring_thread = None
 
-def notify_user(process_name, pid):
-    """
-    Envoie une notification système pour un processus inactif avec un son personnalisé.
-    """
-    try:
-        toast = Notification(
-            app_id="Surveillance Processus",
-            title="Alerte : Processus Inactif",
-            msg=f"Le processus '{process_name}' (PID: {pid}) est inactif et consomme des ressources.",
-            duration="long"
-        )
-        toast.set_audio(ALERT_SOUND, loop=False)
-        toast.show()
-    except Exception as e:
-        print(f"Erreur lors de l'envoi de la notification pour le processus {pid}: {e}")
+# Événement permettant de demander l'arrêt du moteur.
+stop_event = threading.Event()
+stop_event.set()
 
-def stop_process(pid):
-    """
-    Tente d'arrêter le processus donné.
-    """
-    try:
-        process = psutil.Process(pid)
-        if process.username() != "root":  # Vérification pour éviter les processus système critiques
-            process.terminate()
-            print(f"Processus {pid} arrêté avec succès.")
-        else:
-            print(f"Impossible d'arrêter le processus {pid} (droits root nécessaires).")
-    except psutil.NoSuchProcess:
-        print(f"Processus {pid} introuvable.")
-    except Exception as e:
-        print(f"Erreur lors de l'arrêt du processus {pid} : {e}")
+# Correspondance entre les noms affichés dans l'interface
+# et les identifiants utilisés par monitor_service.py.
+SOUND_OPTIONS = {
+    "Par défaut": "default",
+    "Critique": "critical",
+    "Rappel": "reminder",
+}
 
-def monitor_processes():
-    """
-    Surveille les processus actifs pour identifier ceux qui sont inactifs.
-    """
-    global is_monitoring
-    print("Démarrage de la surveillance des processus...")
-    while is_monitoring:
-        for process in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_info', 'create_time']):
-            if not is_monitoring:
-                break  # Quitter la boucle si la surveillance est arrêtée
-            try:
-                # Récupération des informations du processus
-                pid = process.info['pid']
-                name = process.info['name']
-                cpu_percent = process.info['cpu_percent']
-                memory_used = process.info['memory_info'].rss / (1024 * 1024)  # Convertir le octet en Mo
-                create_time = process.info['create_time']
 
-                # Temps depuis la création du processus
-                elapsed_time = time.time() - create_time
-
-                # Vérification des critères d'inactivité
-                if elapsed_time > INACTIVE_THRESHOLD and cpu_percent < CPU_USAGE_THRESHOLD and memory_used > MEMORY_USAGE_THRESHOLD:
-                    print(f"Processus '{name}' (PID: {pid}) identifié comme inactif.")
-                    # Appel de la fonction de notification
-                    notify_user(name, pid)
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-
-        # Pause entre les cycles de surveillance
-        time.sleep(MONITORING_INTERVAL)
-
-    print("Surveillance arrêtée.")
-
+# ============================================================
+# 2. CONFIGURATION DES PARAMÈTRES
+# ============================================================
 
 def set_monitoring_interval(interval):
     """
-    Change l'intervalle de surveillance.
+    Met à jour l'intervalle entre deux vérifications.
     """
-    global MONITORING_INTERVAL
-    try:
-        MONITORING_INTERVAL = max(1, int(interval))  # Minimum 1 seconde
-        print(f"Intervalle de surveillance mis à jour à {MONITORING_INTERVAL} secondes.")
-    except ValueError:
-        print("Erreur : Intervalle invalide. Veuillez entrer un nombre entier.")
 
-def set_alert_sound(sound_choice ):
+    try:
+        new_interval = validate_interval(interval)
+
+        config.monitoring_interval = new_interval
+
+        print(
+            f"Intervalle de surveillance : "
+            f"{config.monitoring_interval} seconde(s)."
+        )
+
+        return True
+
+    except ValueError as error:
+
+        messagebox.showerror(
+            "Paramètre invalide",
+            str(error)
+        )
+
+        return False
+
+
+def set_monitoring_settings(
+    inactive_duration,
+    cpu_threshold,
+    memory_threshold
+):
     """
-    Change le son des notifications en fonction du choix.
+    Met à jour les critères utilisés pour détecter
+    une faible activité.
     """
-    global ALERT_SOUND
-    if sound_choice == "Par défaut":
-        ALERT_SOUND = "default.wav"  # Remplacez par un chemin vers un fichier audio
-    elif sound_choice == "Critique":        
-         ALERT_SOUND = "critical.wav"
-    elif sound_choice == "Rappel":
-        ALERT_SOUND = "reminder.wav"
-    else:
-        print("Choix de son invalide. Son par défaut sélectionné.")
-        ALERT_SOUND = "default.wav"
-    print(f"Son de notification mis à jour à {ALERT_SOUND}.")
-     
-    
+
+    try:
+
+        (
+            new_duration,
+            new_cpu,
+            new_memory
+        ) = validate_settings(
+            inactive_duration,
+            cpu_threshold,
+            memory_threshold
+        )
+
+        config.inactive_threshold = new_duration
+        config.cpu_usage_threshold = new_cpu
+        config.memory_usage_threshold = new_memory
+
+        print("Critères de surveillance mis à jour :")
+        print(
+            f"- Durée : {config.inactive_threshold} seconde(s)"
+        )
+        print(
+            f"- Seuil CPU : {config.cpu_usage_threshold} %"
+        )
+        print(
+            f"- Seuil mémoire : {config.memory_usage_threshold} Mo"
+        )
+
+        messagebox.showinfo(
+            "Configuration",
+            "Les critères de surveillance ont été mis à jour."
+        )
+
+        return True
+
+    except ValueError as error:
+
+        messagebox.showerror(
+            "Paramètres invalides",
+            f"Vérifiez les valeurs saisies.\n\nDétail : {error}"
+        )
+
+        return False
+
+
+def set_alert_sound(sound_choice):
+    """
+    Sélectionne un son système pris en charge par winotify.
+    """
+
+    if sound_choice not in SOUND_OPTIONS:
+
+        messagebox.showerror(
+            "Son invalide",
+            "Veuillez sélectionner un son proposé dans la liste."
+        )
+
+        return False
+
+    selected_sound = SOUND_OPTIONS[sound_choice]
+
+    try:
+        # Vérifie que le moteur reconnaît ce son.
+        resolve_sound(selected_sound)
+
+        config.alert_sound = selected_sound
+
+        print(
+            f"Son de notification sélectionné : {sound_choice}"
+        )
+
+        return True
+
+    except ValueError as error:
+
+        messagebox.showerror(
+            "Son invalide",
+            str(error)
+        )
+
+        return False
+
+
+# ============================================================
+# 3. EXÉCUTION DU MOTEUR DANS UN THREAD
+# ============================================================
+
+def _monitoring_worker():
+    """
+    Exécute le moteur de surveillance dans un thread.
+
+    Cette fonction sert d'adaptateur entre l'interface
+    graphique et le moteur indépendant.
+    """
+
+    global is_monitoring
+
+    try:
+
+        monitor_processes(
+            stop_event=stop_event,
+            config=config
+        )
+
+    except Exception as error:
+
+        print(
+            f"Erreur pendant l'exécution de la surveillance : {error}"
+        )
+
+    finally:
+
+        is_monitoring = False
+
+
+# ============================================================
+# 4. DÉMARRAGE ET ARRÊT DE LA SURVEILLANCE
+# ============================================================
+
 def start_monitoring():
     """
-    Démarre la surveillance dans un thread séparé.
+    Démarre le thread de surveillance.
     """
+
     global is_monitoring
-    if not is_monitoring:
-        is_monitoring = True
-        monitoring_thread = threading.Thread(target=monitor_processes, daemon=True)
-        monitoring_thread.start()
-        messagebox.showinfo("Surveillance", "La surveillance des processus a démarré.")
-    else:
-        messagebox.showinfo("Surveillance", "La surveillance est déjà en cours.")
+    global monitoring_thread
+
+    if is_monitoring:
+
+        messagebox.showinfo(
+            "Surveillance",
+            "La surveillance est déjà en cours."
+        )
+
+        return
+
+    if (
+        monitoring_thread is not None
+        and monitoring_thread.is_alive()
+    ):
+
+        messagebox.showinfo(
+            "Surveillance",
+            "L'arrêt précédent est encore en cours. "
+            "Réessayez dans un instant."
+        )
+
+        return
+
+    stop_event.clear()
+    is_monitoring = True
+
+    monitoring_thread = threading.Thread(
+        target=_monitoring_worker,
+        daemon=True,
+        name="ProcessScope-Monitor"
+    )
+
+    monitoring_thread.start()
+
+    messagebox.showinfo(
+        "Surveillance",
+        "La surveillance des processus a démarré."
+    )
+
 
 def stop_monitoring():
     """
-    Arrête la surveillance.
+    Demande l'arrêt du thread de surveillance.
     """
-    global is_monitoring
-    if is_monitoring:
-        is_monitoring = False
-        messagebox.showinfo("Surveillance", "La surveillance des processus a été arrêtée.")
-    else:
-        messagebox.showinfo("Surveillance", "La surveillance n'est pas en cours.")
+
+    if not is_monitoring:
+
+        messagebox.showinfo(
+            "Surveillance",
+            "La surveillance n'est pas en cours."
+        )
+
+        return
+
+    stop_event.set()
+
+    messagebox.showinfo(
+        "Surveillance",
+        "L'arrêt de la surveillance a été demandé."
+    )
+
+
+# ============================================================
+# 5. INTERFACE GRAPHIQUE
+# ============================================================
 
 def create_notification_page(parent_frame):
-    # Page principale
-    notification_frame = ctk.CTkFrame(parent_frame, corner_radius=15, fg_color="#1C1C1C", width=600, height=450)
 
-    # Titre de la page
+    notification_frame = ctk.CTkFrame(
+        parent_frame,
+        corner_radius=15,
+        fg_color="#1C1C1C",
+        width=600,
+        height=450
+    )
+
+    notification_frame.grid_columnconfigure(0, weight=1)
+    notification_frame.grid_columnconfigure(1, weight=1)
+
     title_label = ctk.CTkLabel(
         notification_frame,
         text="Gestion des Notifications",
         font=("Forte", 36, "bold"),
         text_color="#ECF0F1"
     )
-    title_label.grid(row=0, column=0, columnspan=2, pady=(20, 10))
 
-    # Frame centrale
-    central_frame = ctk.CTkFrame(notification_frame, fg_color="#2B2B2B")
-    central_frame.grid(row=1, column=0, padx=20, pady=20, sticky="nsew")
+    title_label.grid(
+        row=0,
+        column=0,
+        columnspan=2,
+        pady=(20, 10)
+    )
 
-    # Boutons et champs dans le central_frame
-    start_button = ctk.CTkButton(central_frame, text="Démarrer la Surveillance", command=start_monitoring, fg_color="#387F39")
-    start_button.grid(row=0, column=0, padx=15, pady=10)
+    # --------------------------------------------------------
+    # Zone de configuration
+    # --------------------------------------------------------
 
-    stop_button = ctk.CTkButton(central_frame, text="Arrêter la Surveillance", command=stop_monitoring, fg_color="#AF1740")
-    stop_button.grid(row=0, column=1, padx=15, pady=10)
+    central_frame = ctk.CTkFrame(
+        notification_frame,
+        fg_color="#2B2B2B"
+    )
 
-    interval_label = ctk.CTkLabel(central_frame, text="Intervalle de Surveillance:", text_color="white")
-    interval_label.grid(row=1, column=0, padx=10, pady=5)
+    central_frame.grid(
+        row=1,
+        column=0,
+        padx=15,
+        pady=15,
+        sticky="nsew"
+    )
 
-    interval_entry = ctk.CTkEntry(central_frame, width=150)
-    interval_entry.insert(0, "5")  # Valeur par défaut
-    interval_entry.grid(row=1, column=1, padx=10, pady=5)
+    central_frame.grid_columnconfigure(0, weight=1)
+    central_frame.grid_columnconfigure(1, weight=1)
 
-    sound_label = ctk.CTkLabel(central_frame, text="Son des Notifications:", text_color="white")
-    sound_label.grid(row=2, column=0, padx=10, pady=5)
+    start_button = ctk.CTkButton(
+        central_frame,
+        text="Démarrer la surveillance",
+        command=start_monitoring,
+        fg_color="#387F39"
+    )
 
-    sound_options = ["Par défaut", "Critique", "Rappel"]
-    sound_combobox = ctk.CTkComboBox(central_frame, values=sound_options, state="readonly", width=150)
-    sound_combobox.set("Par défaut")
-    sound_combobox.grid(row=2, column=1, padx=10, pady=5)
+    start_button.grid(
+        row=0,
+        column=0,
+        padx=8,
+        pady=10,
+        sticky="ew"
+    )
+
+    stop_button = ctk.CTkButton(
+        central_frame,
+        text="Arrêter la surveillance",
+        command=stop_monitoring,
+        fg_color="#AF1740"
+    )
+
+    stop_button.grid(
+        row=0,
+        column=1,
+        padx=8,
+        pady=10,
+        sticky="ew"
+    )
+
+    # --------------------------------------------------------
+    # Intervalle de surveillance
+    # --------------------------------------------------------
+
+    interval_label = ctk.CTkLabel(
+        central_frame,
+        text="Intervalle (secondes) :",
+        text_color="white"
+    )
+
+    interval_label.grid(
+        row=1,
+        column=0,
+        padx=8,
+        pady=5,
+        sticky="w"
+    )
+
+    interval_entry = ctk.CTkEntry(
+        central_frame,
+        width=130
+    )
+
+    interval_entry.insert(
+        0,
+        str(config.monitoring_interval)
+    )
+
+    interval_entry.grid(
+        row=1,
+        column=1,
+        padx=8,
+        pady=5
+    )
 
     update_interval_button = ctk.CTkButton(
         central_frame,
-        text="Mettre à jour l'Intervalle",
-        command=lambda: set_monitoring_interval(interval_entry.get()),
-        fg_color="blue"
+        text="Mettre à jour l'intervalle",
+        command=lambda: set_monitoring_interval(
+            interval_entry.get()
+        ),
+        fg_color="#2457A6"
     )
-    update_interval_button.grid(row=3, column=0, padx=10, pady=10)
+
+    update_interval_button.grid(
+        row=2,
+        column=0,
+        columnspan=2,
+        padx=8,
+        pady=8,
+        sticky="ew"
+    )
+
+    # --------------------------------------------------------
+    # Son des notifications
+    # --------------------------------------------------------
+
+    sound_label = ctk.CTkLabel(
+        central_frame,
+        text="Son des notifications :",
+        text_color="white"
+    )
+
+    sound_label.grid(
+        row=3,
+        column=0,
+        padx=8,
+        pady=5,
+        sticky="w"
+    )
+
+    sound_combobox = ctk.CTkComboBox(
+        central_frame,
+        values=list(SOUND_OPTIONS.keys()),
+        state="readonly",
+        width=130
+    )
+
+    sound_combobox.set("Par défaut")
+
+    sound_combobox.grid(
+        row=3,
+        column=1,
+        padx=8,
+        pady=5
+    )
 
     update_sound_button = ctk.CTkButton(
         central_frame,
-        text="Mettre à jour le Son",
-        command=lambda: set_alert_sound(sound_combobox.get()),
-        fg_color="blue"
+        text="Mettre à jour le son",
+        command=lambda: set_alert_sound(
+            sound_combobox.get()
+        ),
+        fg_color="#2457A6"
     )
-    update_sound_button.grid(row=3, column=1, padx=10, pady=10)
 
-    # Ajout de l'image dans la frame centrale
-    image_path = "C:/Users/ELITEBOOK/Desktop/ProjetLinux/assets/images/micro.png"  # Chemin vers l'image
+    update_sound_button.grid(
+        row=4,
+        column=0,
+        columnspan=2,
+        padx=8,
+        pady=8,
+        sticky="ew"
+    )
+
+    # --------------------------------------------------------
+    # Critères de détection
+    # --------------------------------------------------------
+
+    settings_title = ctk.CTkLabel(
+        central_frame,
+        text="Critères de détection",
+        font=("Arial", 15, "bold"),
+        text_color="#F5B041"
+    )
+
+    settings_title.grid(
+        row=5,
+        column=0,
+        columnspan=2,
+        pady=(12, 5)
+    )
+
+    duration_label = ctk.CTkLabel(
+        central_frame,
+        text="Durée d'inactivité (s) :",
+        text_color="white"
+    )
+
+    duration_label.grid(
+        row=6,
+        column=0,
+        padx=8,
+        pady=4,
+        sticky="w"
+    )
+
+    duration_entry = ctk.CTkEntry(
+        central_frame,
+        width=130
+    )
+
+    duration_entry.insert(
+        0,
+        str(config.inactive_threshold)
+    )
+
+    duration_entry.grid(
+        row=6,
+        column=1,
+        padx=8,
+        pady=4
+    )
+
+    cpu_label = ctk.CTkLabel(
+        central_frame,
+        text="Seuil CPU (%) :",
+        text_color="white"
+    )
+
+    cpu_label.grid(
+        row=7,
+        column=0,
+        padx=8,
+        pady=4,
+        sticky="w"
+    )
+
+    cpu_entry = ctk.CTkEntry(
+        central_frame,
+        width=130
+    )
+
+    cpu_entry.insert(
+        0,
+        str(config.cpu_usage_threshold)
+    )
+
+    cpu_entry.grid(
+        row=7,
+        column=1,
+        padx=8,
+        pady=4
+    )
+
+    memory_label = ctk.CTkLabel(
+        central_frame,
+        text="Seuil mémoire (Mo) :",
+        text_color="white"
+    )
+
+    memory_label.grid(
+        row=8,
+        column=0,
+        padx=8,
+        pady=4,
+        sticky="w"
+    )
+
+    memory_entry = ctk.CTkEntry(
+        central_frame,
+        width=130
+    )
+
+    memory_entry.insert(
+        0,
+        str(config.memory_usage_threshold)
+    )
+
+    memory_entry.grid(
+        row=8,
+        column=1,
+        padx=8,
+        pady=4
+    )
+
+    update_settings_button = ctk.CTkButton(
+        central_frame,
+        text="Mettre à jour les critères",
+        command=lambda: set_monitoring_settings(
+            duration_entry.get(),
+            cpu_entry.get(),
+            memory_entry.get()
+        ),
+        fg_color="#2457A6"
+    )
+
+    update_settings_button.grid(
+        row=9,
+        column=0,
+        columnspan=2,
+        padx=8,
+        pady=10,
+        sticky="ew"
+    )
+
+    # --------------------------------------------------------
+    # Image décorative
+    # --------------------------------------------------------
+
+    image_path = IMAGES_DIR / "micro.png"
+
     try:
-        photo = PhotoImage(file=image_path)
-        image_label = ctk.CTkLabel(central_frame, image=photo, text="")
-        image_label.image = photo  # Référence pour éviter le garbage collection
-        image_label.grid(row=4, column=0, columnspan=2, pady=(10, 0))
-    except Exception as e:
-        print(f"Erreur lors du chargement de l'image : {e}")
 
-    # Frame droite pour les remarques
-    right_frame = ctk.CTkFrame(notification_frame, width=250, height=300, fg_color="#2B2B2B")
-    right_frame.grid(row=1, column=1, padx=20, pady=20)
+        photo = PhotoImage(file=str(image_path))
 
-    # Titre des remarques
+        image_label = ctk.CTkLabel(
+            central_frame,
+            image=photo,
+            text=""
+        )
+
+        image_label.image = photo
+
+        image_label.grid(
+            row=10,
+            column=0,
+            columnspan=2,
+            pady=(5, 10)
+        )
+
+    except Exception as error:
+
+        print(
+            f"Erreur lors du chargement de l'image : {error}"
+        )
+
+    # --------------------------------------------------------
+    # Zone des remarques
+    # --------------------------------------------------------
+
+    right_frame = ctk.CTkFrame(
+        notification_frame,
+        width=250,
+        height=300,
+        fg_color="#2B2B2B"
+    )
+
+    right_frame.grid(
+        row=1,
+        column=1,
+        padx=15,
+        pady=15,
+        sticky="nsew"
+    )
+
     remark_title = ctk.CTkLabel(
         right_frame,
-        text="Remarque :",
+        text="Remarques",
         font=("Forte", 30, "bold"),
         text_color="#F5B041"
     )
+
     remark_title.pack(pady=(10, 5))
 
-    # Liste des warnings avec valeur par défaut ajoutée
     warnings = [
-        "Choisissez un **intervalle raisonnable** pour éviter une surcharge CPU.",
-        "Des valeurs trop basses peuvent **ralentir** le système.",
-        "Assurez-vous que les notifications sont **activées** dans votre système.",
-        "Utilisez un **seuil mémoire** adapté à vos besoins.",
-        "La surveillance excessive peut **affecter** les performances.",
-        "Vérifiez les **droits d'administrateur** si nécessaire.",
-        "**Valeur par défaut de l'intervalle** : 5 secondes (modifiable dans l'entrée)."
+        "Une faible activité CPU ne signifie pas forcément qu'un processus est inutile.",
+        "La durée d'inactivité est calculée à partir des observations CPU.",
+        "Le seuil mémoire sert à filtrer les processus à surveiller.",
+        "Une alerte est envoyée une seule fois par période d'inactivité.",
+        "Une activité CPU détectée réinitialise la période d'inactivité.",
+        "Les notifications Windows doivent être autorisées dans les paramètres système.",
+        "L'arrêt d'un processus n'est pas automatique."
     ]
 
     for warning in warnings:
-        warning_frame = ctk.CTkFrame(right_frame, fg_color="#1C1C1C", corner_radius=10)
-        warning_frame.pack(pady=5, padx=10, fill="x")
-        bullet_label = ctk.CTkLabel(warning_frame, text="⚠️", font=("Arial", 16), text_color="#F5B041")
-        bullet_label.pack(side="left", padx=5)
+
+        warning_frame = ctk.CTkFrame(
+            right_frame,
+            fg_color="#1C1C1C",
+            corner_radius=10
+        )
+
+        warning_frame.pack(
+            pady=5,
+            padx=10,
+            fill="x"
+        )
+
+        bullet_label = ctk.CTkLabel(
+            warning_frame,
+            text="⚠",
+            font=("Arial", 16),
+            text_color="#F5B041"
+        )
+
+        bullet_label.pack(
+            side="left",
+            padx=5
+        )
+
         warning_label = ctk.CTkLabel(
             warning_frame,
             text=warning,
             font=("Arial", 12),
             text_color="white",
-            anchor="w"
+            anchor="w",
+            justify="left",
+            wraplength=200
         )
-        warning_label.pack(side="left", padx=5, expand=True, fill="x")
+
+        warning_label.pack(
+            side="left",
+            padx=5,
+            pady=5,
+            expand=True,
+            fill="x"
+        )
 
     return notification_frame

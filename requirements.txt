@@ -1,0 +1,6 @@
+
+customtkinter
+psutil
+matplotlib
+Pillow
+winotify

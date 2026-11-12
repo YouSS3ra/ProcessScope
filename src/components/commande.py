@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk
 from tkinter import PhotoImage 
 import customtkinter as ctk
+from paths import IMAGES_DIR
 
 def create_command_page(parent):
     """
@@ -94,10 +95,9 @@ def create_command_page(parent):
 
     
     
-    # Ajout de l'image
-    image_path = "C:/Users/ELITEBOOK/Desktop/ProjetLinux/assets/images/c5.png"  # Chemin vers l'image
+    image_path = IMAGES_DIR / "c5.png"
     try:
-        photo = tk.PhotoImage(file=image_path)
+        photo = tk.PhotoImage(file=str(image_path))
         image_label = ctk.CTkLabel(container, image=photo, text="")
         image_label.image = photo  # Référence pour éviter le garbage collection
         image_label.pack(pady=(20, 10))  # Ajout d'un padding
