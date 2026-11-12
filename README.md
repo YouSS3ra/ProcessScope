@@ -64,7 +64,11 @@ Generate CSV reports containing process information for external inspection and 
 
 ### Command-Line Interface
 
-Control the monitoring service directly from the terminal, independently of the graphical interface.
+ProcessScope can run its monitoring service independently in the background, without requiring the graphical interface to remain open.
+
+When a process meets the configured monitoring conditions, the user receives a **native Windows desktop notification directly on their PC**. These alerts are not limited to terminal messages: they are displayed through the Windows notification system and use the alert sound selected through the monitoring configuration.
+
+The CLI supports three alert sounds: `default`, `critical`, and `reminder`.
 
 <p align="center">
   <img src="assets/images/CLI.png" alt="ProcessScope command-line interface" width="90%">
